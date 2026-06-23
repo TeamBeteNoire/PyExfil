@@ -1,104 +1,117 @@
-#!/usr/bin/env python2.7
+#!/usr/bin/env python3
 
 import logging
-import thread
-
 import socket
+import threading
 
-import sys
-sys.path.append("../../../")
-from pyexfil.includes.encryption_wrappers import AESDecryptOFB, AESEncryptOFB
-from pyexfil.includes.encryption_wrappers import PYEXFIL_DEFAULT_PASSWORD
-
-
-# compatibility
-try:
-	input = raw_input
-except NameError:
-	pass
+from pyexfil.includes.base import CommModule
+from pyexfil.includes.encryption_wrappers import (
+    AESDecryptOFB,
+    AESEncryptOFB,
+    _DEFAULT_PASSWORD,
+)
 
 logging.getLogger().setLevel(logging.DEBUG)
 
 
 def testCallBack(src, decryptedMsg):
-	print("HEREsdfk")
-	print("\n[%s:%s](incoming)\t'%s'.\n" % (src[0], src[1], decryptedMsg))
+    print("\n[%s:%s](incoming)\t'%s'.\n" % (src[0], src[1], decryptedMsg))
 
 
-class Broker():
+class Broker(CommModule):
 
-	def __init__(self, client, host="127.0.0.1", port=9100, key=PYEXFIL_DEFAULT_PASSWORD, retFunc=testCallBack):
-		"""
-		Start the brokering server listener.
-		:param client: Client's IP [str]
-		:param server: Server bind addr [str]
-		:param port: Listening Port [int]
-		:param key: Key for AES-OFB mode. [str]
-		:param retFunc: The function to call when a packet comes in.
-		:return: None
-		"""
-		logging.info('Now listening for 9100/udp Broadcasts.')
-		logging.info('Hit \'exit\' to quit.')
-		self.retFunc = retFunc
-		self.key = key
-		self.client = client
-		self.port = port
-		self.host = host
-		
+    MODULE_NAME = "JetDirectBroker"
+    PROTOCOL    = "jetdirect-udp"
 
-	def parse_message(self, src, data):
-		"""
-		Start the brokering server listener.
-		:param ip: Client IP addr [str]
-		:return: None
-		"""
-		# Here is where you want to hook up to automate communication
-		# with the clients.
+    def __init__(self, client, host="127.0.0.1", port=9100,
+                 key=_DEFAULT_PASSWORD, retFunc=testCallBack,
+                 on_message=None, verbose=False):
+        """
+        :param client: Client's IP to send to [str]
+        :param host:   Bind address for listener [str]
+        :param port:   UDP port [int]
+        :param key:    AES-OFB key [bytes or str]
+        :param retFunc: Legacy callback(src, plaintext). Kept for back-compat.
+        :param on_message: CommModule callback(data, meta).
+        """
+        super().__init__(enc_key=key if isinstance(key, str) else "", on_message=on_message, verbose=verbose)
+        # Store the raw key for the AES wrappers (may be bytes)
+        self._raw_key = key
+        self.retFunc  = retFunc
+        self.client   = client
+        self.port     = port
+        self.host     = host
+        logging.info("Now listening for %s/udp Broadcasts.", port)
+        logging.info("Hit 'exit' to quit.")
 
-		decPayload = AESDecryptOFB(key=self.key, text=data)
+    # ------------------------------------------------------------------
+    # Internal helpers (legacy protocol logic — unchanged)
+    # ------------------------------------------------------------------
 
-		if self.retFunc is not None:
-			self.retFunc(src, decPayload)
+    def parse_message(self, src, data):
+        decPayload = AESDecryptOFB(key=self._raw_key, data=data)
+        if self.retFunc is not None:
+            self.retFunc(src, decPayload)
+        return decPayload
 
+    def listen_clients(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        logging.info("Listening on UDP %s:%s", self.host, self.port)
+        s.bind((self.host, self.port))
+        while not self._stop_event.is_set():
+            s.settimeout(1.0)
+            try:
+                (data, addr) = s.recvfrom(128 * 1024)
+                self.parse_message(addr, data)
+            except socket.timeout:
+                continue
 
-	def listen_clients(self):
-		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-		s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-		
-		logging.info("Listening on UDP %s:%s" % (self.host, self.port))
-		s.bind((self.host, self.port))
-		while True:
-			(data, addr) = s.recvfrom(128 * 1024)
-			self.parse_message(addr, data)
+    def broadcast_message(self, message):
+        if isinstance(message, str):
+            message = message.encode("utf-8")
+        msg = AESEncryptOFB(key=self._raw_key, text=message)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(msg, (self.client, self.port))
 
+    # ------------------------------------------------------------------
+    # CommModule abstract implementations
+    # ------------------------------------------------------------------
 
-	def broadcast_message(self, message):
-		"""
-		Send a message over ARP Broadcast
-		:param message: Message to send as str.
-		:param key: The parameter to use as key.
-		:return None:
-		"""
-		msg = AESEncryptOFB(key=self.key, text=message)
-		sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
-		sock.sendto(msg, (self.client, self.port))
+    def _broadcast_impl(self, data, **kwargs):
+        self.broadcast_message(data)
+        return True
+
+    def _send_impl(self, data, **kwargs):
+        return self._broadcast_impl(data)
+
+    def _listen_impl(self, callback, **kwargs):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        logging.info("Listening on UDP %s:%s", self.host, self.port)
+        s.bind((self.host, self.port))
+        while not self._stop_event.is_set():
+            s.settimeout(1.0)
+            try:
+                (data, addr) = s.recvfrom(128 * 1024)
+                plaintext = AESDecryptOFB(key=self._raw_key, data=data)
+                callback(plaintext, {"src": addr})
+            except socket.timeout:
+                continue
 
 
 if __name__ == '__main__':
-	# Make sure all log messages show up
-
-	b = Broker(client="127.0.0.1")
-	thread.start_new_thread(b.listen_clients, ())
-	while True:
-		send_me = input("message> ")
-		msg = send_me.strip()
-		if msg == "":
-			continue
-
-		elif msg.strip() == "exit":
-			logging.info("Got exit message.\n")
-			exit()
-
-		else:
-			b.broadcast_message(msg)
-			logging.info("[%s] out the door." % len(msg))
+    b = Broker(client="127.0.0.1")
+    t = threading.Thread(target=b.listen_clients, daemon=True)
+    t.start()
+    while True:
+        send_me = input("message> ")
+        msg = send_me.strip()
+        if msg == "":
+            continue
+        elif msg == "exit":
+            logging.info("Got exit message.\n")
+            exit()
+        else:
+            b.broadcast_message(msg)
+            logging.info("[%s] out the door.", len(msg))

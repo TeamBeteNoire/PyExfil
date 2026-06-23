@@ -15,3 +15,6 @@ venv/
 venv2/
 venv2.7/
 /mypy_cache/
+tasks.md
+.venv_test/
+.pytest_cache/

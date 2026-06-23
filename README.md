@@ -104,9 +104,15 @@ c.Run()
 After this you can use which ever `PyExfil` module you would like to try and exfiltrate the data set created. This way you can test your detection without risking exfiltrating valuable data.
 
 
-## Contributions
+## Contributing
 
-We welcome it! From testing, to improving quality of code and up to entirely new methods.
+We welcome contributions — from testing and bug fixes to entirely new covert channels.
+
+- **[DOCUMENTATION.md](DOCUMENTATION.md)** — how to write a new module using the class hierarchy, which base class to inherit, and where to register it.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — the full class hierarchy reference (`NetworkModule`, `CommModule`, `PhysicalModule`, `StegaModule`) with API details and examples.
+- **[CALL_TO_ACTION.md](CALL_TO_ACTION.md)** — a curated list of open tasks: modules that still need conversion to the new class system, new channel ideas, test coverage gaps, and Python 3 modernisation work.
+
+If you want to help, start with [CALL_TO_ACTION.md](CALL_TO_ACTION.md) — every item there has a file path and clear instructions.
 
 ## Future Changes
 
@@ -126,10 +132,12 @@ For details about version look at the [tags on this repository](https://www.gith
 - [x] Some old modules recoded to fit new standard.
 - [x] Full compatibility between Python2 and Python3.
 
-### Version 1.4 - ?:
-- [ ] Expand physical exfiltration channels.
-- [ ] Re-test servers on older modules.
-- [ ] Add file manipulation class (for example, module `zipception` does not fit into any existing category although currently residing under `Stega`).
+### Version 1.5 - Lorax
+- [x] Created structure, finally...
+- [x] Proper documentation on contributing. 
+- [x] Adding `CALL_TO_ACTION.md` for community assistance. 
+- [x] Fixed some of the older legacy modules. 
+- [x] Adding `tests` for some basic smoketests. Will add more module oriented tests later on. 
 
 ### Hopefully - Close Future
 - [x] Attempt at creating a more uniform call convention. *See DOCUMENTATION.md*.

@@ -1,9 +1,9 @@
 NAME            = "PyExfil"
 SLOGAN          = "Stress Testing Detection & Creativity"
-VERSION_CODE    = '1.3.3'
-VERSION_NAME    = "Harpax"
+VERSION_CODE    = '1.5.0'
+VERSION_NAME    = "LORAX"
 VERSION         = VERSION_CODE
 AUTHORS         = ['tisf']
 RELEASE_DATE    = '2020-12-31'
-LAST_UPDATE     = '2025-07-01'
+LAST_UPDATE     = '2026-07-23'
 URL             = 'https://PyExfil.MoriRT.com'

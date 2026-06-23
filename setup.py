@@ -1,35 +1,47 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from pyexfil import AUTHORS, RELEASE_DATE, NAME, URL, SLOGAN, VERSION
-from pyexfil import LAST_UPDATE
+from pyexfil import AUTHORS, RELEASE_DATE, NAME, URL, SLOGAN, VERSION, LAST_UPDATE
 
 __author__ = AUTHORS[0]
 __license__ = 'GPLv3'
-__copyright__ = '%s, %s' % (LAST_UPDATE[0:3], AUTHORS[0])
+__copyright__ = '%s, %s' % (LAST_UPDATE[0:4], AUTHORS[0])
 
 import os
 
 try:
-    from setuptools import setup
+    from setuptools import setup, find_packages
 except ImportError:
     from distutils.core import setup
 
-
 required = [
-        'requests>=1.0.0', 'impacket>=0.9.0', 'slackclient', 'progressbar',
-        'numpy', 'Pillow', 'pytube3', 'hashlib', 'urllib2', 'PyCrypto',
-        'base58', 'names', 'Faker', 'luhn'
-        ]
-
+    'requests>=2.0.0',
+    'impacket>=0.9.0',
+    'slack-sdk',
+    'progressbar2',
+    'numpy',
+    'Pillow',
+    'pycryptodome',
+    'base58',
+    'names',
+    'Faker',
+    'luhn',
+    'qrcode',
+    'scipy',
+    'sounddevice',
+    'pylibdmtx',
+    'opencv-python',
+    'librosa',
+]
 
 if __name__ == '__main__':
     if os.path.exists('MANIFEST'):
         os.remove('MANIFEST')
 
-    long_desc = "See full README and USAGE on GITHUB yisf %s." % (NAME)
+    long_desc = "See full README and USAGE on GITHUB yisf %s." % NAME
 
-    setup(name='PyExfil',
+    setup(
+        name='PyExfil',
         maintainer=__author__,
         maintainer_email='yuval@morirt.com',
         description="A Python package for data exfiltration.",
@@ -38,20 +50,22 @@ if __name__ == '__main__':
         version=VERSION,
         download_url=URL,
         long_description=long_desc,
-        packages=['pyexfil'],
+        packages=find_packages(),
         install_requires=required,
+        python_requires='>=3.6',
         platforms='any',
         classifiers=(
-                'Intended Audience :: Developers',
-                'Intended Audience :: Science/Research',
-                'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
-                'Topic :: Software Development',
-                'Topic :: Scientific/Engineering',
-                'Environment :: Console',
-                'Operating System :: Microsoft :: Windows',
-                'Operating System :: POSIX',
-                'Operating System :: Unix',
-                'Operating System :: MacOS',
-                'Programming Language :: Python',
-                'Programming Language :: Python :: 3',)
-        )
+            'Intended Audience :: Developers',
+            'Intended Audience :: Science/Research',
+            'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
+            'Topic :: Software Development',
+            'Topic :: Scientific/Engineering',
+            'Environment :: Console',
+            'Operating System :: Microsoft :: Windows',
+            'Operating System :: POSIX',
+            'Operating System :: Unix',
+            'Operating System :: MacOS',
+            'Programming Language :: Python',
+            'Programming Language :: Python :: 3',
+        ),
+    )

